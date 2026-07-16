@@ -1,0 +1,30 @@
+# Virtual environment
+venv/
+
+# PyInstaller build artifacts
+# build/
+# dist/
+*.spec
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# User local config (generated at runtime)
+.winlauncher/
+
+# Generated files
+# icon.ico
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
