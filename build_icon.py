@@ -1,40 +1,25 @@
-import struct, zlib
+"""Build the application ICO from the supplied artwork."""
 
-width, height = 32, 32
-pixels = bytearray()
-for y in range(height):
-    for x in range(width):
-        dx, dy = x - 16, y - 16
-        dist = (dx*dx + dy*dy) ** 0.5
-        if dist < 15:
-            r, g, b, a = 45, 125, 70, 255
-        elif dist < 16:
-            r, g, b, a = 45, 125, 70, 255
-        else:
-            r, g, b, a = 0, 0, 0, 0
-        pixels.extend([b, g, r, a])
+from pathlib import Path
 
-def create_png(w, h, px):
-    def chunk(ctype, data):
-        c = ctype + data
-        return struct.pack('>I', len(data)) + c + struct.pack('>I', zlib.crc32(c) & 0xffffffff)
-    raw = b''
-    for y in range(h):
-        raw += b'\x00'
-        raw += bytes(px[y*w*4:(y+1)*w*4])
-    ihdr = struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0)
-    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', ihdr) +
-            chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+from PIL import Image, ImageOps
 
-png_data = create_png(width, height, pixels)
 
-def create_ico(w, h, png_bytes):
-    size = len(png_bytes)
-    header = struct.pack('<HHH', 0, 1, 1)
-    entry = struct.pack('<BBBBHHII', w if w < 256 else 0,
-                        h if h < 256 else 0, 0, 0, 1, 32, size, 22)
-    return header + entry + png_bytes
+ROOT = Path(__file__).resolve().parent
+SOURCE = ROOT / "微信图片_20260324203125_293_65.webp"
+OUTPUT = ROOT / "icon.ico"
+SIZES = (16, 24, 32, 48, 64, 128, 256)
 
-with open('icon.ico', 'wb') as f:
-    f.write(create_ico(width, height, png_data))
-print('Icon generated: icon.ico')
+
+def main() -> None:
+    if not SOURCE.is_file():
+        raise FileNotFoundError(f"Icon source not found: {SOURCE}")
+    with Image.open(SOURCE) as source:
+        rgba = source.convert("RGBA")
+        square = ImageOps.fit(rgba, (256, 256), method=Image.Resampling.LANCZOS)
+        square.save(OUTPUT, format="ICO", sizes=[(size, size) for size in SIZES])
+    print(f"Icon generated: {OUTPUT}")
+
+
+if __name__ == "__main__":
+    main()

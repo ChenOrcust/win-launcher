@@ -1,4 +1,7 @@
 import json
+import os
+import shutil
+import tempfile
 from pathlib import Path
 
 
@@ -29,22 +32,45 @@ class ConfigManager:
             try:
                 data = json.loads(self.config_file.read_text("utf-8"))
                 self._data = self._defaults() | data
-            except Exception:
+            except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
+                self._backup_corrupt_file(self.config_file)
                 self._data = self._defaults()
         if self.groups_file.exists():
             try:
-                self._groups = json.loads(self.groups_file.read_text("utf-8"))
-            except Exception:
+                groups = json.loads(self.groups_file.read_text("utf-8"))
+                self._groups = groups if isinstance(groups, list) else []
+            except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
+                self._backup_corrupt_file(self.groups_file)
                 self._groups = []
 
     def save(self):
         self.config_dir.mkdir(parents=True, exist_ok=True)
-        self.config_file.write_text(
-            json.dumps(self._data, indent=2, ensure_ascii=False), "utf-8"
-        )
-        self.groups_file.write_text(
-            json.dumps(self._groups, indent=2, ensure_ascii=False), "utf-8"
-        )
+        self._atomic_write(self.config_file, self._data)
+        self._atomic_write(self.groups_file, self._groups)
+
+    @staticmethod
+    def _backup_corrupt_file(path: Path):
+        try:
+            shutil.copy2(path, path.with_suffix(path.suffix + ".corrupt"))
+        except OSError:
+            pass
+
+    @staticmethod
+    def _atomic_write(path: Path, value):
+        payload = json.dumps(value, indent=2, ensure_ascii=False)
+        fd, temp_name = tempfile.mkstemp(prefix=path.name, suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp_name, path)
+        except Exception:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+            raise
 
     @property
     def groups(self):

@@ -1,12 +1,14 @@
 import ctypes
 import ctypes.wintypes
 import json
+import logging
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QSize, QFileInfo, Signal, QMimeData
+from PySide6.QtCore import Qt, QTimer, QSize, QFileInfo, Signal, QMimeData, QPoint
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -148,19 +150,24 @@ def _menu_style() -> str:
         QMenu::separator {{ height: 1px; background: {c['border']}; margin: 4px 8px; }}
     """
 
-def launch_app(app: dict):
+logger = logging.getLogger("winlauncher")
+
+
+def launch_app(app: dict) -> bool:
     target = app.get("target", "")
     args = app.get("args", "")
     work_dir = app.get("working_dir", "")
     if not target:
-        return
+        return False
     try:
-        cmd = f'"{target}"'
+        cmd = [target]
         if args:
-            cmd = f'{cmd} {args}'
-        subprocess.Popen(cmd, cwd=work_dir or None)
-    except Exception:
-        pass
+            cmd.extend(shlex.split(args, posix=False))
+        subprocess.Popen(cmd, cwd=work_dir or None, close_fds=True)
+        return True
+    except (OSError, ValueError):
+        logger.exception("Failed to launch %s", target)
+        return False
 
 
 # ─── App button (group) ───────────────────────────────────────
@@ -760,13 +767,13 @@ class LauncherWindow(QMainWindow):
         self._search_timer.timeout.connect(self._perform_search)
 
     def _setup_ui(self):
-        self.setWindowTitle("WinLauncher")
+        self.setWindowTitle("WinLauncher · Command Deck")
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMinimumSize(640, 520)
-        self.resize(800, 600)
+        self.resize(840, 620)
 
         self._central = QWidget()
         self._central.setObjectName("central")
@@ -796,7 +803,8 @@ class LauncherWindow(QMainWindow):
         srch.addWidget(icon_lbl)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search apps ...")
+        self.search_input.setPlaceholderText("搜索应用，按 Enter 启动…")
+        self.search_input.setClearButtonEnabled(True)
         self.search_input.textChanged.connect(self._on_search_changed)
         self.search_input.returnPressed.connect(self._on_search_enter)
         srch.addWidget(self.search_input)
@@ -831,18 +839,20 @@ class LauncherWindow(QMainWindow):
         bottom = QHBoxLayout()
         bottom.setSpacing(6)
 
-        self._btn_groups = QPushButton("Groups")
+        self._btn_groups = QPushButton("工作台")
         self._btn_groups.setCheckable(True)
         self._btn_groups.setChecked(True)
         self._btn_groups.clicked.connect(lambda: self._show_page(self.PAGE_GROUPS))
         bottom.addWidget(self._btn_groups)
 
-        self._btn_allapps = QPushButton("All Apps")
+        self._btn_allapps = QPushButton("全部应用")
         self._btn_allapps.setCheckable(True)
         self._btn_allapps.clicked.connect(lambda: self._show_page(self.PAGE_ALLAPPS))
         bottom.addWidget(self._btn_allapps)
 
         add_grp = QPushButton("＋ Group")
+        add_grp.setText("＋ 新建分组")
+        self._add_group_btn = add_grp
         add_grp.clicked.connect(self._add_group_dialog)
         bottom.addWidget(add_grp)
 
@@ -917,6 +927,12 @@ class LauncherWindow(QMainWindow):
 
         self._btn_groups.setStyleSheet(self._nav_style(c))
         self._btn_allapps.setStyleSheet(self._nav_style(c))
+        self._add_group_btn.setStyleSheet(f"""
+            QPushButton {{ background: {c['bg_active']}; color: #ffffff; border: none;
+                padding: 7px 16px; border-radius: 8px; font-size: 12px; font-weight: 700; }}
+            QPushButton:hover {{ background: #1683d8; }}
+            QPushButton:pressed {{ background: #005a9e; }}
+        """)
 
         self._manage_btn.setStyleSheet(f"""
             QPushButton {{ background: transparent; border: none;
@@ -1305,7 +1321,7 @@ class LauncherWindow(QMainWindow):
                 border: none; border-radius: 6px; font-weight: 500; }}
             QPushButton:hover {{ background: {c['border']}; }}
             QPushButton[text="OK"] {{ background: {c['bg_active']}; color: #fff; }}
-            QPushButton[text="OK"]:hover {{ background: #35854a; }}
+            QPushButton[text="OK"]:hover {{ background: #106ebe; }}
         """)
 
         hotkey_result = [None]
@@ -1411,9 +1427,13 @@ class LauncherWindow(QMainWindow):
             if parsed is None:
                 return
             mod_flags, vk = parsed
-            ctypes.windll.user32.RegisterHotKey(hwnd, 1, mod_flags, vk)
-        except Exception:
-            pass
+            registered = ctypes.windll.user32.RegisterHotKey(hwnd, 1, mod_flags, vk)
+            if not registered:
+                logger.warning("Global hotkey is already in use: %s", self._hotkey_label())
+            return bool(registered)
+        except (AttributeError, OSError, ValueError):
+            logger.exception("Unable to register global hotkey")
+            return False
 
     def _unregister_hotkey(self):
         try:
@@ -1466,11 +1486,17 @@ def main():
     app.setApplicationName("WinLauncher")
     app.setOrganizationName("WinLauncher")
 
-    font = QFont("Segoe UI Variable", 9)
+    font = QFont("Microsoft YaHei", 9)
     font.setStyleStrategy(QFont.PreferAntialias)
     app.setFont(font)
 
     config_dir = Path.home() / ".winlauncher"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        filename=config_dir / "winlauncher.log",
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
     cfg = ConfigManager(config_dir)
 
     # init theme from config
@@ -1484,6 +1510,8 @@ def main():
     exe_dir = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
     ico_file = exe_dir / "icon.ico"
     tray_icon = QIcon(str(ico_file)) if ico_file.exists() else QIcon(_make_tray_pixmap())
+    app.setWindowIcon(tray_icon)
+    window.setWindowIcon(tray_icon)
     tray = QSystemTrayIcon(tray_icon)
     hotkey_label = window._hotkey_label()
     tray.setToolTip(f"WinLauncher ({hotkey_label})")
