@@ -1,4 +1,4 @@
-_current_setting = "dark"
+_current_setting = "light"
 
 DARK = {
     "bg": "#202020",
@@ -19,7 +19,7 @@ DARK = {
 }
 
 LIGHT = {
-    "bg": "#f3f3f3",
+    "bg": "#F8FAFC",
     "bg_widget": "#ffffff",
     "bg_hover": "#e5f1fb",
     "bg_search": "#ffffff",

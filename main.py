@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QFileIconProvider,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -77,6 +78,12 @@ for i in range(1, 13):
 _icon_provider = QFileIconProvider()
 
 LETTERS = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _resource_path(name: str) -> Path:
+    """Resolve bundled resources for both source runs and one-file builds."""
+    bundle_dir = getattr(sys, "_MEIPASS", None)
+    return Path(bundle_dir) / name if bundle_dir else Path(__file__).resolve().parent / name
 
 
 def _extract_icon(path: str, index: int) -> QIcon | None:
@@ -185,8 +192,8 @@ class AppButton(QToolButton):
             tip += f"\n{app_info['target']}"
         self.setToolTip(tip)
         self.setIcon(_get_app_icon(app_info))
-        self.setIconSize(QSize(28, 28))
-        self.setFixedSize(80, 72)
+        self.setIconSize(QSize(48, 48))
+        self.setFixedSize(112, 104)
         self.setCursor(Qt.PointingHandCursor)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
@@ -239,10 +246,11 @@ class AppButton(QToolButton):
         c = theme_module.current()
         self.setStyleSheet(f"""
             QToolButton {{
-                background: transparent; border: none;
-                border-radius: 8px; padding: 4px 2px; color: {c['text_muted']}; font-size: 11px;
+                background: {c['bg_widget']}; border: 1px solid {c['border_light']};
+                border-radius: 16px; padding: 8px 4px; color: {c['text_secondary']}; font-size: 12px;
             }}
-            QToolButton:hover {{ background-color: {c['bg_hover']}; }}
+            QToolButton:hover {{ background-color: {c['bg_hover']}; border-color: {c['bg_active']}; }}
+            QToolButton:pressed {{ background-color: #dbeefe; }}
         """)
 
     def _remove_self(self):
@@ -291,9 +299,9 @@ class GroupWidget(QFrame):
 
         layout.addLayout(header)
 
-        self._grid = QHBoxLayout()
-        self._grid.setSpacing(6)
-        self._grid.addStretch()
+        self._grid = QGridLayout()
+        self._grid.setSpacing(12)
+        self._grid.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         layout.addLayout(self._grid)
         self._populate_grid()
 
@@ -303,7 +311,7 @@ class GroupWidget(QFrame):
             GroupWidget {{
                 background-color: {c['bg_widget']};
                 border: 1px solid {c['border']};
-                border-radius: 12px;
+                border-radius: 16px;
             }}
         """)
         if hasattr(self, 'name_label'):
@@ -319,14 +327,14 @@ class GroupWidget(QFrame):
                 )
 
     def _populate_grid(self):
-        while self._grid.count() > 1:
+        while self._grid.count() > 0:
             item = self._grid.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self._app_buttons.clear()
-        for app in self.group_data.get("apps", []):
+        for index, app in enumerate(self.group_data.get("apps", [])):
             btn = AppButton(app)
-            self._grid.insertWidget(self._grid.count() - 1, btn)
+            self._grid.addWidget(btn, index // 7, index % 7)
             self._app_buttons.append(btn)
 
     def refresh(self, group_data: dict):
@@ -767,33 +775,50 @@ class LauncherWindow(QMainWindow):
         self._search_timer.timeout.connect(self._perform_search)
 
     def _setup_ui(self):
-        self.setWindowTitle("WinLauncher · Command Deck")
+        self.setWindowTitle("WinLauncher")
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setMinimumSize(640, 520)
-        self.resize(840, 620)
+        self.setMinimumSize(760, 560)
+        self.resize(900, 650)
 
         self._central = QWidget()
         self._central.setObjectName("central")
         self.setCentralWidget(self._central)
 
         shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(60)
-        shadow.setColor(QColor(0, 0, 0, 140))
-        shadow.setOffset(0, 10)
+        shadow.setBlurRadius(44)
+        shadow.setColor(QColor(15, 23, 42, 42))
+        shadow.setOffset(0, 8)
         self._central.setGraphicsEffect(shadow)
 
         layout = QVBoxLayout(self._central)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(14)
 
         # ── resize grip ──
         self._grip = QSizeGrip(self._central)
         self._grip.installEventFilter(self)
 
         # ── search bar ──
+        hero = QHBoxLayout()
+        hero.setSpacing(12)
+        brand = QVBoxLayout()
+        brand.setSpacing(1)
+        self._hero_title = QLabel("WinLauncher")
+        self._hero_title.setObjectName("heroTitle")
+        self._hero_subtitle = QLabel("你的应用，一触即达")
+        self._hero_subtitle.setObjectName("heroSubtitle")
+        brand.addWidget(self._hero_title)
+        brand.addWidget(self._hero_subtitle)
+        hero.addLayout(brand)
+        hero.addStretch()
+        self._status_label = QLabel("●  已就绪")
+        self._status_label.setObjectName("statusLabel")
+        hero.addWidget(self._status_label)
+        layout.addLayout(hero)
+
         self._search_frame = QFrame()
         self._search_frame.setObjectName("searchFrame")
         srch = QHBoxLayout(self._search_frame)
@@ -810,6 +835,9 @@ class LauncherWindow(QMainWindow):
         srch.addWidget(self.search_input)
 
         layout.addWidget(self._search_frame)
+        self._section_label = QLabel("已固定的应用")
+        self._section_label.setObjectName("sectionLabel")
+        layout.addWidget(self._section_label)
 
         # ── content stack ──
         self.content_stack = QStackedWidget()
@@ -892,7 +920,7 @@ class LauncherWindow(QMainWindow):
             QWidget#central {{
                 background-color: {c['bg']};
                 border: 1px solid {c['border']};
-                border-radius: 12px;
+                border-radius: 24px;
             }}
         """)
 
@@ -900,7 +928,7 @@ class LauncherWindow(QMainWindow):
             QFrame#searchFrame {{
                 background-color: {c['bg_search']};
                 border: 1px solid {c['border']};
-                border-radius: 10px;
+                border-radius: 12px;
             }}
             QFrame#searchFrame:focus-within {{
                 border-color: {c['bg_active']};
@@ -913,6 +941,20 @@ class LauncherWindow(QMainWindow):
                 font-size: 13px; padding: 4px;
             }}
         """)
+
+        self._hero_title.setStyleSheet(
+            f"font-size: 24px; font-weight: 600; color: {c['text']}; background: transparent;"
+        )
+        self._hero_subtitle.setStyleSheet(
+            f"font-size: 12px; color: {c['text_muted']}; background: transparent;"
+        )
+        self._status_label.setStyleSheet(
+            f"font-size: 12px; color: {c['bg_active']}; background: {c['bg_hover']}; "
+            "border-radius: 12px; padding: 6px 10px;"
+        )
+        self._section_label.setStyleSheet(
+            f"font-size: 18px; font-weight: 600; color: {c['text']}; background: transparent;"
+        )
 
         self.results_list.setStyleSheet(f"""
             QListWidget {{ background: transparent; border: none; color: {c['text']}; font-size: 13px; }}
@@ -966,7 +1008,7 @@ class LauncherWindow(QMainWindow):
         for i, gd in enumerate(self.config.groups):
             gw = GroupWidget(i, gd)
             n = len(gd.get("apps", []))
-            h = max(110, 72 + ((n - 1) // 7 + 1) * 82)
+            h = max(150, 76 + ((n - 1) // 7 + 1) * 116)
             gw.setFixedHeight(h)
             item = QListWidgetItem()
             item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
@@ -1486,7 +1528,13 @@ def main():
     app.setApplicationName("WinLauncher")
     app.setOrganizationName("WinLauncher")
 
-    font = QFont("Microsoft YaHei", 9)
+    # Set the process/application icon before creating any windows. This is
+    # what Windows uses for the taskbar and shell surfaces.
+    bundled_icon = _resource_path("icon.ico")
+    app_icon = QIcon(str(bundled_icon)) if bundled_icon.exists() else QIcon(_make_tray_pixmap())
+    app.setWindowIcon(app_icon)
+
+    font = QFont("Segoe UI Variable", 9)
     font.setStyleStrategy(QFont.PreferAntialias)
     app.setFont(font)
 
@@ -1500,17 +1548,19 @@ def main():
     cfg = ConfigManager(config_dir)
 
     # init theme from config
-    theme_module.set_setting(cfg.get("theme", "dark"))
+    # Upgrade installations created by the older dark default once; future
+    # user selections in Settings remain respected.
+    if cfg.get("theme", "light") == "dark" and not cfg.get("fluent_light_migrated", False):
+        cfg.set("theme", "light")
+        cfg.set("fluent_light_migrated", True)
+    theme_module.set_setting(cfg.get("theme", "light"))
 
     scanner = StartMenuScanner()
     scanner.scan()
 
     window = LauncherWindow(cfg, scanner)
 
-    exe_dir = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
-    ico_file = exe_dir / "icon.ico"
-    tray_icon = QIcon(str(ico_file)) if ico_file.exists() else QIcon(_make_tray_pixmap())
-    app.setWindowIcon(tray_icon)
+    tray_icon = app_icon
     window.setWindowIcon(tray_icon)
     tray = QSystemTrayIcon(tray_icon)
     hotkey_label = window._hotkey_label()
