@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizeGrip,
     QStackedWidget,
+    QStyle,
     QSystemTrayIcon,
     QToolButton,
     QTreeWidget,
@@ -56,7 +57,7 @@ from PySide6.QtWidgets import (
 )
 
 from config_manager import ConfigManager
-from start_menu import StartMenuScanner, parse_lnk_file
+from start_menu import StartMenuScanner, get_sort_initial, get_sort_key, parse_lnk_file
 import theme as theme_module
 
 WM_HOTKEY = 0x0312
@@ -109,25 +110,42 @@ def _get_app_icon(app: dict) -> QIcon:
     target = app.get("target", "")
     icon_path = app.get("icon_path", "")
     icon_index = app.get("icon_index", 0)
-    lnk_path = app.get("lnk_path", "")
-
     # Try icon_path with its specific index first (handles DLL resources)
     if icon_path and os.path.exists(icon_path):
         icon = _extract_icon(icon_path, icon_index)
         if icon:
             return icon
 
-    # Try target at index 0 (no shortcut arrow overlay)
+    # Try target at index 0 (no shortcut arrow overlay).
     if target and os.path.exists(target):
         icon = _extract_icon(target, 0)
         if icon:
             return icon
 
-    # Fallback: lnk_path (may have shortcut arrow overlay, but better than nothing)
-    if lnk_path and os.path.exists(lnk_path):
-        return _icon_provider.icon(QFileInfo(lnk_path))
+    # Never ask Windows for the icon of a .lnk itself: QFileIconProvider adds
+    # the shell's shortcut-arrow overlay. A target-file fallback is safe.
+    if target and os.path.exists(target) and Path(target).suffix.casefold() not in {".lnk", ".url", ".appref-ms"}:
+        icon = _icon_provider.icon(QFileInfo(target))
+        if not icon.isNull():
+            return icon
 
-    return QIcon()
+    # A neutral glyph keeps Store/shell apps visually consistent without an
+    # arrow overlay when their package icon cannot be extracted.
+    pm = QPixmap(48, 48)
+    pm.fill(Qt.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setBrush(QColor("#E5F1FB"))
+    painter.setPen(Qt.NoPen)
+    painter.drawRoundedRect(2, 2, 44, 44, 12, 12)
+    painter.setPen(QColor("#0078D4"))
+    font = painter.font()
+    font.setPixelSize(22)
+    font.setBold(True)
+    painter.setFont(font)
+    painter.drawText(pm.rect(), Qt.AlignCenter, (app.get("name") or "A")[:1].upper())
+    painter.end()
+    return QIcon(pm)
 
 
 def _make_tray_pixmap() -> QPixmap:
@@ -164,6 +182,22 @@ def launch_app(app: dict) -> bool:
     target = app.get("target", "")
     args = app.get("args", "")
     work_dir = app.get("working_dir", "")
+    app_id = app.get("app_id", "")
+    shortcut = app.get("lnk_path", "")
+    if app_id:
+        try:
+            subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{app_id}"], close_fds=True)
+            return True
+        except OSError:
+            logger.exception("Failed to launch shell app %s", app_id)
+            return False
+    if shortcut and Path(shortcut).suffix.casefold() in {".lnk", ".url", ".appref-ms"} and os.path.exists(shortcut):
+        try:
+            os.startfile(shortcut)
+            return True
+        except OSError:
+            logger.exception("Failed to open shortcut %s", shortcut)
+            return False
     if not target:
         return False
     try:
@@ -723,6 +757,192 @@ class AllAppsWidget(QWidget):
 
 # ─── Draggable group list ─────────────────────────────────────
 
+class Win11AllAppsWidget(QWidget):
+    """Flat, alphabetical Windows 11-style All apps surface."""
+
+    def __init__(self, scanner: StartMenuScanner, parent=None):
+        super().__init__(parent)
+        self.scanner = scanner
+        self._current_letter = "#"
+        self._expanded_folders: set[str] = set()
+        self._letter_rows: dict[str, QListWidgetItem] = {}
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 4, 0, 0)
+        outer.setSpacing(8)
+
+        letter_panel = QFrame()
+        letter_panel.setObjectName("letterPanel")
+        letter_panel.setFixedWidth(58)
+        letters = QGridLayout(letter_panel)
+        letters.setContentsMargins(2, 4, 2, 4)
+        letters.setHorizontalSpacing(2)
+        letters.setVerticalSpacing(2)
+        self._letter_btns = {}
+        for index, char in enumerate(LETTERS):
+            button = QPushButton(char)
+            button.setFixedSize(27, 20)
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(lambda checked=False, c=char: self._jump_to(c))
+            letters.addWidget(button, index // 2, index % 2)
+            self._letter_btns[char] = button
+        outer.addWidget(letter_panel)
+
+        self._list = QListWidget()
+        self._list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self._list.setSpacing(2)
+        self._list.itemClicked.connect(self._on_item_clicked)
+        self._list.itemDoubleClicked.connect(self._on_launch)
+        self._list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._on_context)
+        outer.addWidget(self._list, 1)
+        self._build_index()
+
+    def apply_theme(self, c: dict):
+        self._list.setStyleSheet(f"""
+            QListWidget {{ background: transparent; border: none; color: {c['text']}; font-size: 13px; }}
+            QListWidget::item {{ padding: 7px 12px; border-radius: 8px; }}
+            QListWidget::item:hover {{ background: {c['bg_hover']}; }}
+            QListWidget::item:selected {{ background: {c['bg_hover']}; color: {c['text']}; }}
+            QScrollBar:vertical {{ background: transparent; width: 6px; margin: 2px 0; }}
+            QScrollBar::handle:vertical {{ background: {c['scrollbar']}; border-radius: 3px; min-height: 30px; }}
+            QScrollBar::handle:vertical:hover {{ background: {c['scrollbar_hover']}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+        """)
+        panel = self.findChild(QFrame, "letterPanel")
+        if panel:
+            panel.setStyleSheet(f"background: {c['bg']}; border: none;")
+        self._highlight_letter(self._current_letter)
+        self._render()
+
+    @staticmethod
+    def _folder_name(app: dict) -> str:
+        raw = (app.get("folder") or "").replace("/", "\\").strip("\\")
+        parts = [part for part in raw.split("\\") if part]
+        if parts and parts[0].casefold() == "programs":
+            parts = parts[1:]
+        if not parts or parts[0].casefold() == "windows apps":
+            return ""
+        return parts[0]
+
+    def _build_index(self):
+        folders: dict[str, list[dict]] = {}
+        roots: list[dict] = []
+        for app in self.scanner.apps:
+            folder = self._folder_name(app)
+            if folder:
+                folders.setdefault(folder, []).append(app)
+            else:
+                roots.append(app)
+        entries: list[dict] = list(roots)
+        for name, children in folders.items():
+            entries.append({"item_type": "folder", "name": name, "children": children})
+        self._index = {letter: [] for letter in LETTERS}
+        for entry in sorted(entries, key=lambda item: get_sort_key(item.get("name", ""))):
+            self._index.setdefault(get_sort_initial(entry.get("name", "")), []).append(entry)
+        self._render()
+
+    def _highlight_letter(self, char: str):
+        c = theme_module.current()
+        selected = f"QPushButton {{ background: {c['bg_active']}; border: none; color: #fff; border-radius: 5px; font-size: 10px; font-weight: 700; }}"
+        normal = f"QPushButton {{ background: transparent; border: none; color: {c['text_muted']}; border-radius: 5px; font-size: 10px; font-weight: 600; }} QPushButton:hover {{ background: {c['bg_hover']}; color: {c['text']}; }}"
+        for key, button in self._letter_btns.items():
+            button.setStyleSheet(selected if key == char else normal)
+
+    def _jump_to(self, char: str):
+        self._current_letter = char
+        self._highlight_letter(char)
+        row = self._letter_rows.get(char)
+        if row:
+            self._list.scrollToItem(row, QAbstractItemView.PositionAtTop)
+
+    def _render(self):
+        if not hasattr(self, "_list"):
+            return
+        self._list.clear()
+        self._letter_rows.clear()
+        folder_icon = self.style().standardIcon(QStyle.SP_DirIcon)
+        for char in LETTERS:
+            entries = self._index.get(char, [])
+            if not entries:
+                continue
+            header = QListWidgetItem(char)
+            header.setFlags(Qt.NoItemFlags)
+            header.setSizeHint(QSize(0, 30))
+            self._list.addItem(header)
+            self._letter_rows[char] = header
+            header.setForeground(QColor(theme_module.current()["bg_active"]))
+            font = header.font()
+            font.setPointSize(15)
+            font.setBold(True)
+            header.setFont(font)
+            for entry in entries:
+                if entry.get("item_type") == "folder":
+                    item = QListWidgetItem(("▾  " if entry["name"] in self._expanded_folders else "▸  ") + entry["name"])
+                    item.setIcon(folder_icon)
+                    item.setData(Qt.UserRole, entry)
+                    self._list.addItem(item)
+                    if entry["name"] in self._expanded_folders:
+                        for child in sorted(entry["children"], key=lambda app: get_sort_key(app.get("name", ""))):
+                            child_item = QListWidgetItem("      " + child.get("name", ""))
+                            child_item.setIcon(_get_app_icon(child))
+                            child_item.setData(Qt.UserRole, child)
+                            child_item.setSizeHint(QSize(0, 38))
+                            self._list.addItem(child_item)
+                else:
+                    item = QListWidgetItem(entry.get("name", ""))
+                    item.setIcon(_get_app_icon(entry))
+                    item.setData(Qt.UserRole, entry)
+                    item.setSizeHint(QSize(0, 38))
+                    self._list.addItem(item)
+
+    def _on_item_clicked(self, item: QListWidgetItem):
+        entry = item.data(Qt.UserRole)
+        if entry and entry.get("item_type") == "folder":
+            name = entry["name"]
+            if name in self._expanded_folders:
+                self._expanded_folders.remove(name)
+            else:
+                self._expanded_folders.add(name)
+            self._render()
+
+    def _on_launch(self, item: QListWidgetItem):
+        app = item.data(Qt.UserRole)
+        if app and app.get("item_type") != "folder":
+            launch_app(app)
+
+    def _on_context(self, pos):
+        item = self._list.itemAt(pos)
+        app = item.data(Qt.UserRole) if item else None
+        if not app or app.get("item_type") == "folder":
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(_menu_style())
+        menu.addAction("Launch").triggered.connect(lambda: launch_app(app))
+        menu.addSeparator()
+        parent = self.parent()
+        while parent and not hasattr(parent, "config"):
+            parent = parent.parent()
+        groups = parent.config.groups if parent and hasattr(parent, "config") else []
+        if groups:
+            submenu = menu.addMenu("Add to Group")
+            for index, group in enumerate(groups):
+                submenu.addAction(group["name"]).triggered.connect(
+                    lambda checked=False, idx=index: self._add_to_group(idx, app)
+                )
+        menu.exec(self._list.mapToGlobal(pos))
+
+    def _add_to_group(self, group_index: int, app: dict):
+        parent = self.parent()
+        while parent and not hasattr(parent, "_add_to_group"):
+            parent = parent.parent()
+        if parent:
+            parent._add_to_group(group_index, app)
+
+    def refresh(self):
+        self._build_index()
+
+
 class GroupsListWidget(QListWidget):
     order_changed = Signal()
 
@@ -777,7 +997,7 @@ class LauncherWindow(QMainWindow):
     def _setup_ui(self):
         self.setWindowTitle("WinLauncher")
         self.setWindowFlags(
-            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+            Qt.FramelessWindowHint | Qt.Window
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMinimumSize(760, 560)
@@ -858,7 +1078,7 @@ class LauncherWindow(QMainWindow):
         self.content_stack.addWidget(self.results_list)
 
         # page 2: all apps (A‑Z / Folders)
-        self.allapps_view = AllAppsWidget(self.scanner, self)
+        self.allapps_view = Win11AllAppsWidget(self.scanner, self)
         self.content_stack.addWidget(self.allapps_view)
 
         layout.addWidget(self.content_stack, 1)
@@ -885,6 +1105,12 @@ class LauncherWindow(QMainWindow):
         bottom.addWidget(add_grp)
 
         bottom.addStretch()
+
+        self._minimize_btn = QPushButton("—")
+        self._minimize_btn.setFixedSize(32, 32)
+        self._minimize_btn.setToolTip("最小化到任务栏")
+        self._minimize_btn.clicked.connect(self.showMinimized)
+        bottom.addWidget(self._minimize_btn)
 
         self._manage_btn = QPushButton("⚙")
         self._manage_btn.setFixedSize(32, 32)
@@ -976,6 +1202,11 @@ class LauncherWindow(QMainWindow):
             QPushButton:pressed {{ background: #005a9e; }}
         """)
 
+        self._minimize_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; border: none;
+                color: {c['text_muted']}; border-radius: 8px; font-size: 18px; }}
+            QPushButton:hover {{ background: {c['bg_hover']}; color: {c['text']}; }}
+        """)
         self._manage_btn.setStyleSheet(f"""
             QPushButton {{ background: transparent; border: none;
                 color: {c['text_muted']}; border-radius: 8px; font-size: 14px; }}
@@ -1298,7 +1529,7 @@ class LauncherWindow(QMainWindow):
         hotkey_btn.setStyleSheet(f"""
             QPushButton {{ background: {c['bg_search']}; color: {c['text']};
                 border: 1px solid {c['border']}; border-radius: 4px; padding: 4px 12px;
-                font-family: Consolas, monospace; }}
+                font-family: "Microsoft YaHei"; }}
             QPushButton:hover {{ border-color: #60a5fa; }}
         """)
         fl.addRow("Hotkey:", hotkey_btn)
@@ -1310,7 +1541,7 @@ class LauncherWindow(QMainWindow):
             hotkey_btn.setStyleSheet(f"""
                 QPushButton {{ background: {c['bg_active']}; color: #fff;
                     border: 1px solid {c['bg_active']}; border-radius: 4px; padding: 4px 12px;
-                    font-family: Consolas, monospace; }}
+                font-family: "Microsoft YaHei"; }}
             """)
             hotkey_btn.grabKeyboard()
 
@@ -1322,7 +1553,7 @@ class LauncherWindow(QMainWindow):
             hotkey_btn.setStyleSheet(f"""
                 QPushButton {{ background: {c['bg_search']}; color: {c['text']};
                     border: 1px solid {c['border']}; border-radius: 4px; padding: 4px 12px;
-                    font-family: Consolas, monospace; }}
+                font-family: "Microsoft YaHei"; }}
                 QPushButton:hover {{ border-color: #60a5fa; }}
             """)
             hotkey_btn.releaseKeyboard()
@@ -1498,6 +1729,12 @@ class LauncherWindow(QMainWindow):
         return super().nativeEvent(event_type, message)
 
     def _toggle_visibility(self):
+        if self.isMinimized():
+            self.showNormal()
+            self.activateWindow()
+            self.raise_()
+            self.search_input.setFocus()
+            return
         if self.isVisible():
             self.hide()
         else:
@@ -1534,7 +1771,7 @@ def main():
     app_icon = QIcon(str(bundled_icon)) if bundled_icon.exists() else QIcon(_make_tray_pixmap())
     app.setWindowIcon(app_icon)
 
-    font = QFont("Segoe UI Variable", 9)
+    font = QFont("Microsoft YaHei", 9)
     font.setStyleStrategy(QFont.PreferAntialias)
     app.setFont(font)
 
