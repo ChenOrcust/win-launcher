@@ -77,11 +77,47 @@ _icon_provider = QFileIconProvider()
 LETTERS = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
+def _extract_icon(path: str, index: int) -> QIcon | None:
+    try:
+        from ctypes import windll, c_wchar_p, byref, c_int, POINTER, c_void_p
+        from PySide6.QtGui import QPixmap
+        hicon_large = c_void_p()
+        ret = windll.shell32.ExtractIconExW(
+            c_wchar_p(path), c_int(index),
+            byref(hicon_large), None, c_int(1)
+        )
+        if ret > 0 and hicon_large:
+            pm = QPixmap.fromHICON(int(hicon_large.value))
+            windll.user32.DestroyIcon(hicon_large)
+            if pm and not pm.isNull():
+                return QIcon(pm)
+    except Exception:
+        pass
+    return None
+
+
 def _get_app_icon(app: dict) -> QIcon:
-    for key in ("target", "icon_path", "lnk_path"):
-        p = app.get(key, "")
-        if p and os.path.exists(p):
-            return _icon_provider.icon(QFileInfo(p))
+    target = app.get("target", "")
+    icon_path = app.get("icon_path", "")
+    icon_index = app.get("icon_index", 0)
+    lnk_path = app.get("lnk_path", "")
+
+    # Try icon_path with its specific index first (handles DLL resources)
+    if icon_path and os.path.exists(icon_path):
+        icon = _extract_icon(icon_path, icon_index)
+        if icon:
+            return icon
+
+    # Try target at index 0 (no shortcut arrow overlay)
+    if target and os.path.exists(target):
+        icon = _extract_icon(target, 0)
+        if icon:
+            return icon
+
+    # Fallback: lnk_path (may have shortcut arrow overlay, but better than nothing)
+    if lnk_path and os.path.exists(lnk_path):
+        return _icon_provider.icon(QFileInfo(lnk_path))
+
     return QIcon()
 
 

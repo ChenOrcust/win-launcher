@@ -14,11 +14,14 @@ def parse_lnk_file(lnk_path: str) -> dict | None:
             return None
         name = os.path.splitext(os.path.basename(lnk_path))[0]
         icon_loc = shortcut.IconLocation or ""
+        icon_parts = icon_loc.split(",", 1) if icon_loc else []
+        icon_index = int(icon_parts[1]) if len(icon_parts) == 2 and icon_parts[1].strip() else 0
         return {
             "name": name,
             "target": target,
             "args": shortcut.Arguments or "",
-            "icon_path": icon_loc.split(",")[0] or target,
+            "icon_path": os.path.expandvars(icon_parts[0] or target),
+            "icon_index": icon_index,
             "lnk_path": lnk_path,
             "working_dir": shortcut.WorkingDirectory or "",
             "folder": "",
@@ -87,11 +90,14 @@ class StartMenuScanner:
                             continue
                         name = os.path.splitext(file)[0]
                         icon_loc = shortcut.IconLocation or ""
+                        icon_parts = icon_loc.split(",", 1) if icon_loc else []
+                        icon_index = int(icon_parts[1]) if len(icon_parts) == 2 and icon_parts[1].strip() else 0
                         self._apps.append({
                             "name": name,
                             "target": target,
                             "args": shortcut.Arguments or "",
-                            "icon_path": icon_loc.split(",")[0] or target,
+                            "icon_path": os.path.expandvars(icon_parts[0] or target),
+                            "icon_index": icon_index,
                             "lnk_path": lnk_path,
                             "working_dir": shortcut.WorkingDirectory or "",
                             "folder": folder,
