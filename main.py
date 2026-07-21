@@ -971,7 +971,10 @@ class GroupsListWidget(QListWidget):
 
     def dropEvent(self, event: QDropEvent):
         super().dropEvent(event)
-        self.order_changed.emit()
+        # InternalMove updates the model/item-widget association after the
+        # drop event returns. Defer persistence by one event-loop turn so the
+        # order we read is the order the user actually dropped.
+        QTimer.singleShot(0, self.order_changed.emit)
 
 
 # ─── Main window ──────────────────────────────────────────────
@@ -1243,6 +1246,7 @@ class LauncherWindow(QMainWindow):
             gw.setFixedHeight(h)
             item = QListWidgetItem()
             item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
+            item.setData(Qt.UserRole, id(gd))
             item.setSizeHint(QSize(0, h))
             self.groups_list.addItem(item)
             self.groups_list.setItemWidget(item, gw)
@@ -1446,13 +1450,21 @@ class LauncherWindow(QMainWindow):
 
     def _on_groups_reordered(self):
         new_order = []
+        groups_by_id = {id(group): group for group in self.config.groups}
         for i in range(self.groups_list.count()):
-            w = self.groups_list.itemWidget(self.groups_list.item(i))
-            if hasattr(w, "group_data"):
+            item = self.groups_list.item(i)
+            group_data = groups_by_id.get(item.data(Qt.UserRole))
+            w = self.groups_list.itemWidget(item)
+            if group_data is not None:
+                new_order.append(group_data)
+                if hasattr(w, "group_index"):
+                    w.group_index = i
+            elif hasattr(w, "group_data"):
                 new_order.append(w.group_data)
                 w.group_index = i
-        self.config.groups = new_order
-        self.config.save()
+        if len(new_order) != self.groups_list.count():
+            return
+        self.config.reorder_groups(new_order)
 
     def _add_group_dialog(self):
         name = self._input_dialog("New Group", "Group name:")

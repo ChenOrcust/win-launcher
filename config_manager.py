@@ -77,6 +77,15 @@ class ConfigManager:
     def groups(self):
         return self._groups
 
+    def reorder_groups(self, groups: list):
+        """Persist an already validated visual ordering of existing groups."""
+        if len(groups) != len(self._groups):
+            raise ValueError("Reordered group list must contain every group")
+        if {id(group) for group in groups} != {id(group) for group in self._groups}:
+            raise ValueError("Reordered group list contains unknown groups")
+        self._groups = list(groups)
+        self.save()
+
     def add_group(self, name: str, apps: list | None = None):
         group = {"name": name, "apps": apps or []}
         self._groups.append(group)
